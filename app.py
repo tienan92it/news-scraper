@@ -121,6 +121,3 @@ def scrape_and_summarize():
             })
 
     return jsonify(processed_results)
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
