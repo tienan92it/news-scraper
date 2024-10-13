@@ -78,7 +78,7 @@ def is_related_to_topic(article, topic):
 
 @app.route('/scrape', methods=['POST'])
 def scrape_and_summarize():
-    data = request.json
+    data = request.get_json(force=True)
     topic = data.get('topic')
 
     results = asyncio.run(crawl_multiple_urls(urls))
