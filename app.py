@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import requests
 from openai import OpenAI
 from flask import Flask, request, jsonify
 from crawl4ai import AsyncWebCrawler
@@ -89,21 +90,15 @@ def scrape_and_summarize():
         if result.success:
             try:
                 page_summary = json.loads(result.extracted_content)
-                # print(page_summary)
-                # if isinstance(page_summary, list) and len(page_summary) > 0:
-                #     page_summary = page_summary[0]  # Take the first item if it's a list
                 for article in page_summary:
                   if topic:
-                  # Check if the content is related to the topic (if provided)
                     if not is_related_to_topic(article, topic):
-                      continue  # Skip this result if it's not related to the topic
-                  # Add the summary to the processed results
+                      continue
                   processed_results.append({
                       "title": article['title'],
                       "short_description": article['short_description'],
                       "category": article['category']
                         })
-                    
             except json.JSONDecodeError:
                 processed_results.append({
                     "url": urls[i],
@@ -121,3 +116,39 @@ def scrape_and_summarize():
             })
 
     return jsonify(processed_results)
+
+@app.route('/candlestick', methods=['GET'])
+def get_candlestick_data():
+    symbol = request.args.get('symbol', 'BTCUSDT')
+    interval = request.args.get('interval', '1h')
+    limit = request.args.get('limit', 500)
+
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        
+        processed_data = []
+        for candle in data:
+            processed_data.append({
+                "open_time": candle[0],
+                "open": float(candle[1]),
+                "high": float(candle[2]),
+                "low": float(candle[3]),
+                "close": float(candle[4]),
+                "volume": float(candle[5]),
+                "close_time": candle[6],
+                "quote_asset_volume": float(candle[7]),
+                "number_of_trades": int(candle[8])
+            })
+        
+        return jsonify({
+            "symbol": symbol,
+            "interval": interval,
+            "data": processed_data
+        })
+    
+    except requests.RequestException as e:
+        return jsonify({"error": f"Failed to fetch data from Binance: {str(e)}"}), 500
