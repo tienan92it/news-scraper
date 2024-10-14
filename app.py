@@ -1,81 +1,15 @@
-import os
 import json
 import asyncio
 import requests
-from openai import OpenAI
 from flask import Flask, request, jsonify
-from crawl4ai import AsyncWebCrawler
-from crawl4ai.extraction_strategy import LLMExtractionStrategy
-from crawl4ai.chunking_strategy import RegexChunking
-from pydantic import BaseModel, Field
+from utils import crawl_multiple_urls, is_related_to_topic, auth_token
 
 app = Flask(__name__)
 
-# Set up OpenAI API key
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 urls = [
     'https://decrypt.co/news',
-    'https://cryptoslate.com/news/',
-    'https://cryptopanic.com/',
-    'https://thedefiant.io/latest'
+    'https://cryptoslate.com/news/'
 ]
-
-class Article(BaseModel):
-    title: str = Field(..., description="Title of the article.")
-    short_description: str = Field(..., description="Short description or summary of the article.")
-    category: str = Field(..., description="Category or topic of the article.")
-
-async def crawl_multiple_urls(urls):
-    async with AsyncWebCrawler(verbose=True) as crawler:
-        tasks = [crawler.arun(
-            url=url,
-            word_count_threshold=1,
-            extraction_strategy=LLMExtractionStrategy(
-        provider= "openai/gpt-4o-mini", api_token = os.getenv('OPENAI_API_KEY'), 
-        schema=Article.model_json_schema(),
-        extraction_type="schema",
-        apply_chunking =False,
-        instruction="""
-From the crawled content, extract all articles presented on the page. For each article, extract the following details:
-
-1. **Title** of the article.
-2. **Short description** or summary of the article.
-3. **Category** or topic of the article.
-
-Organize the extracted information into a JSON object matching the provided schema, which includesa list of `articles`. Each article should have `title`, `short_description`, and `category` fields.
-
-**Example format:**
-
-```json
-  [
-    {
-        "title": "Article Title 1",
-        "short_description": "Short description of article 1.",
-        "category": "Category of article 1"
-    },
-    {
-        "title": "Article Title 2",
-        "short_description": "Short description of article 2.",
-        "category": "Category of article 2"
-    }
-  ]
-Ensure that all extracted information is accurate and complete. """),
-            chunking_strategy=RegexChunking(),
-            bypass_cache=True
-        ) for url in urls]
-        results = await asyncio.gather(*tasks)
-    return results
-
-def is_related_to_topic(article, topic):
-    content = f"{article['title']}\n{article['short_description']}\n{article['category']}"
-    prompt = f"Determine if the following text is related to the topic '{topic}'. Respond with only 'Yes' or 'No'.\n\nText: {content[:1000]}..."
-    response = client.chat.completions.create(model="gpt-4o-mini",
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant that determines if text is related to a given topic."},
-        {"role": "user", "content": prompt}
-    ])
-    return response.choices[0].message.content.strip().lower() == "yes"
 
 @app.route('/scrape', methods=['POST'])
 def scrape_and_summarize():
@@ -97,7 +31,8 @@ def scrape_and_summarize():
                   processed_results.append({
                       "title": article['title'],
                       "short_description": article['short_description'],
-                      "category": article['category']
+                      "category": article['category'],
+                      "url": article['url']
                         })
             except json.JSONDecodeError:
                 processed_results.append({
@@ -120,7 +55,7 @@ def scrape_and_summarize():
 @app.route('/candlestick', methods=['GET'])
 def get_candlestick_data():
     symbol = request.args.get('symbol', 'BTCUSDT')
-    interval = request.args.get('interval', '1h')
+    interval = request.args.get('interval', '1d')
     limit = request.args.get('limit', 500)
 
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -130,25 +65,79 @@ def get_candlestick_data():
         response.raise_for_status()
         data = response.json()
         
-        processed_data = []
-        for candle in data:
-            processed_data.append({
-                "open_time": candle[0],
-                "open": float(candle[1]),
-                "high": float(candle[2]),
-                "low": float(candle[3]),
-                "close": float(candle[4]),
-                "volume": float(candle[5]),
-                "close_time": candle[6],
-                "quote_asset_volume": float(candle[7]),
-                "number_of_trades": int(candle[8])
-            })
+        # processed_data = []
+        # for candle in data:
+        #     processed_data.append({
+        #         "open_time": candle[0],
+        #         "open": float(candle[1]),
+        #         "high": float(candle[2]),
+        #         "low": float(candle[3]),
+        #         "close": float(candle[4]),
+        #         "volume": float(candle[5]),
+        #         "close_time": candle[6],
+        #         "quote_asset_volume": float(candle[7]),
+        #         "number_of_trades": int(candle[8])
+        #     })
         
-        return jsonify({
-            "symbol": symbol,
-            "interval": interval,
-            "data": processed_data
-        })
+        return jsonify(data)
     
     except requests.RequestException as e:
         return jsonify({"error": f"Failed to fetch data from Binance: {str(e)}"}), 500
+
+@app.route('/cryptopanic', methods=['GET'])
+def get_cryptopanic_data():
+    if not auth_token:
+        return jsonify({"error": "CRYPTOPANIC_AUTH_TOKEN not set in environment variables"}), 500
+
+    base_url = "https://cryptopanic.com/api/free/v1/posts/"
+    
+    # Get query parameters
+    kind = request.args.get('kind', 'news')
+    currencies = request.args.get('currencies')
+    filter_param = request.args.get('filter')
+    page = request.args.get('page', '1')
+
+    # Construct the API URL
+    params = {
+        'auth_token': auth_token,
+        'kind': kind,
+        'page': page
+    }
+    if currencies:
+        params['currencies'] = currencies
+    if filter_param:
+        params['filter'] = filter_param
+
+    try:
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()
+        data = response.json()
+
+        # Process and format the results
+        formatted_results = []
+        for item in data['results']:
+            formatted_item = {
+                'votes': {
+                    'negative': item['votes'].get('negative', 0),
+                    'positive': item['votes'].get('positive', 0),
+                    'important': item['votes'].get('important', 0)
+                },
+                'title': item.get('title', ''),
+                'published_at': item.get('published_at', '')
+            }
+            
+            # Check if 'currencies' property exists and is not None
+            if 'currencies' in item and item['currencies'] is not None:
+                formatted_item['currencies'] = [{
+                    'code': currency.get('code', ''),
+                    'title': currency.get('title', '')
+                } for currency in item['currencies']]
+            else:
+                formatted_item['currencies'] = []
+
+            formatted_results.append(formatted_item)
+
+        return jsonify(formatted_results)
+
+    except requests.RequestException as e:
+        return jsonify({"error": f"Failed to fetch data from CryptoPanic: {str(e)}"}), 500
